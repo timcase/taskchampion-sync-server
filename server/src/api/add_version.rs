@@ -92,15 +92,6 @@ pub(crate) async fn service(
                     .await
                     .map_err(failure_to_ise)?;
                 txn.commit().await.map_err(failure_to_ise)?;
-                // If the client presented a non-nil parent, their chain is from
-                // a previous server. Return 409 with NIL_VERSION_ID so the
-                // client library knows to push from scratch, ensuring the chain
-                // is rooted at nil on this server.
-                if parent_version_id != NIL_VERSION_ID {
-                    let mut rb = HttpResponse::Conflict();
-                    rb.append_header((PARENT_VERSION_ID_HEADER, NIL_VERSION_ID.to_string()));
-                    return Ok(rb.finish());
-                }
                 continue;
             }
             Err(e) => Err(server_error_to_actix(e)),
