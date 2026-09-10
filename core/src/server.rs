@@ -127,18 +127,14 @@ impl Server {
         // Return NotFound if an AddVersion with this parent_version_id would succeed, and
         // otherwise return Gone.
         //
-        // AddVersion will succeed if either
-        //  - the requested parent version is the latest version; or
-        //  - there is no latest version, meaning there are no versions stored for this client
-        Ok(
-            if client.latest_version_id == parent_version_id
-                || client.latest_version_id == NIL_VERSION_ID
-            {
-                GetVersionResult::NotFound
-            } else {
-                GetVersionResult::Gone
-            },
-        )
+        // AddVersion will succeed only if the requested parent version is the latest version. On
+        // an empty chain the latest version is NIL_VERSION_ID, so NIL is the only valid parent
+        // there; any other parent names a version that does not exist for this client.
+        Ok(if client.latest_version_id == parent_version_id {
+            GetVersionResult::NotFound
+        } else {
+            GetVersionResult::Gone
+        })
     }
 
     /// Implementation of the AddVersion protocol transaction
@@ -154,9 +150,7 @@ impl Server {
         let client = txn.get_client().await?.ok_or(ServerError::NoSuchClient)?;
 
         // check if this version is acceptable, under the protection of the transaction
-        if client.latest_version_id != NIL_VERSION_ID
-            && parent_version_id != client.latest_version_id
-        {
+        if parent_version_id != client.latest_version_id {
             log::debug!("add_version request rejected: mismatched latest_version_id");
             return Ok((
                 AddVersionResult::ExpectedParentVersion(client.latest_version_id),
@@ -451,26 +445,6 @@ mod test {
     }
 
     #[tokio::test]
-    async fn get_child_version_not_found_initial_continuing() -> anyhow::Result<()> {
-        let (storage, client_id) = setup();
-        {
-            let mut txn = storage.txn(client_id).await?;
-            txn.new_client(NIL_VERSION_ID).await?;
-            txn.commit().await?;
-        }
-
-        let server = into_server(storage);
-
-        // when no latest version exists, _any_ child version is NOT_FOUND. This allows syncs to
-        // start to a new server even if the client already has been uploading to another service.
-        assert_eq!(
-            server.get_child_version(client_id, Uuid::new_v4(),).await?,
-            GetVersionResult::NotFound
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn get_child_version_not_found_up_to_date() -> anyhow::Result<()> {
         let (storage, client_id) = setup();
         let parent_version_id = Uuid::new_v4();
@@ -539,6 +513,96 @@ mod test {
                 history_segment,
             }
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_version_rejects_non_nil_parent_on_empty_chain() -> anyhow::Result<()> {
+        let (storage, client_id) = setup();
+        add_versions(&storage, client_id, 0, None, None).await?;
+
+        // A replica holding a base_version from a chain that has since been wiped pushes with a
+        // parent naming a version that does not exist. Accepting it would create an orphan root:
+        // a chain with no root reachable from NIL_VERSION_ID.
+        let stale_parent_version_id = Uuid::new_v4();
+        let server = into_server(storage);
+        assert_eq!(
+            server
+                .add_version(client_id, stale_parent_version_id, vec![3, 6, 9])
+                .await?
+                .0,
+            AddVersionResult::ExpectedParentVersion(NIL_VERSION_ID)
+        );
+
+        // verify that the storage wasn't updated
+        let mut txn = server.txn(client_id).await?;
+        assert_eq!(
+            txn.get_client().await?.unwrap().latest_version_id,
+            NIL_VERSION_ID
+        );
+        assert_eq!(
+            txn.get_version_by_parent(stale_parent_version_id).await?,
+            None
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_child_version_gone_for_non_nil_parent_on_empty_chain() -> anyhow::Result<()> {
+        let (storage, client_id) = setup();
+        add_versions(&storage, client_id, 0, None, None).await?;
+
+        // Mirror of add_version_rejects_non_nil_parent_on_empty_chain: a parent that add_version
+        // would reject must report Gone, not NotFound, so the replica is told to rebuild rather
+        // than being invited to push an unreachable chain.
+        let server = into_server(storage);
+        assert_eq!(
+            server.get_child_version(client_id, Uuid::new_v4()).await?,
+            GetVersionResult::Gone
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_version_never_creates_unreachable_chain() -> anyhow::Result<()> {
+        let (storage, client_id) = setup();
+        add_versions(&storage, client_id, 0, None, None).await?;
+
+        let server = into_server(storage);
+
+        // A mix of accepted and rejected pushes, including stale parents naming versions that
+        // never existed.
+        let mut latest = NIL_VERSION_ID;
+        for i in 0..3u8 {
+            server
+                .add_version(client_id, Uuid::new_v4(), vec![i])
+                .await?;
+            if let (AddVersionResult::Ok(version_id), _) =
+                server.add_version(client_id, latest, vec![i]).await?
+            {
+                latest = version_id;
+            } else {
+                panic!("push at head was rejected");
+            }
+        }
+
+        // Whatever was stored, walking parent links from the client's latest version must reach
+        // NIL_VERSION_ID; no version may name a parent that does not exist.
+        let mut txn = server.txn(client_id).await?;
+        let mut version_id = txn.get_client().await?.unwrap().latest_version_id;
+        let mut steps = 0;
+        while version_id != NIL_VERSION_ID {
+            let version = txn
+                .get_version(version_id)
+                .await?
+                .unwrap_or_else(|| panic!("chain references nonexistent version {version_id}"));
+            version_id = version.parent_version_id;
+            steps += 1;
+            assert!(steps <= 3, "chain is longer than the versions pushed");
+        }
+        assert_eq!(steps, 3);
+
         Ok(())
     }
 

@@ -114,7 +114,8 @@ mod test {
     async fn test_success() {
         let client_id = Uuid::new_v4();
         let version_id = Uuid::new_v4();
-        let parent_version_id = Uuid::new_v4();
+        // an empty chain's only valid parent is NIL
+        let parent_version_id = Uuid::nil();
         let storage = InMemoryStorage::new();
 
         // set up the storage contents..
@@ -157,7 +158,8 @@ mod test {
     async fn test_auto_add_client() {
         let client_id = Uuid::new_v4();
         let version_id = Uuid::new_v4();
-        let parent_version_id = Uuid::new_v4();
+        // a newly auto-added client has an empty chain, whose only valid parent is NIL
+        let parent_version_id = Uuid::nil();
         let server = WebServer::new(
             ServerConfig::default(),
             WebConfig::default(),
