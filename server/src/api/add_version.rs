@@ -123,7 +123,8 @@ mod test {
     async fn test_success() {
         let client_id = Uuid::new_v4();
         let version_id = Uuid::new_v4();
-        let parent_version_id = Uuid::new_v4();
+        // an empty chain's only valid parent is NIL
+        let parent_version_id = Uuid::nil();
         let storage = InMemoryStorage::new();
 
         // set up the storage contents..
